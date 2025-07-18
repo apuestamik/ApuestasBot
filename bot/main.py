@@ -28,74 +28,51 @@ sheet = client.open_by_url(SHEET_URL).sheet1
 # Zona horaria
 TZ = pytz.timezone("America/Mexico_City")
 
-def get_next_bet():
-    """Obtiene la próxima apuesta"""
-    data = sheet.get_all_values()
-    if len(data) < 2:
-        return None
-    partido, cantidad, cuota, hora = data[1]
-    return {
-        "partido": partido.strip(),
-        "cantidad": cantidad.strip(),
-        "cuota": cuota.strip(),
-        "hora": hora.strip()
-    }
+# Función para obtener próxima apuesta
+def obtener_proxima_apuesta():
+    rows = sheet.get_all_values()
+    if len(rows) < 2:
+        return "No hay apuestas registradas."
+    
+    data = rows[1]
+    partido = data[0]
+    cantidad = data[1]
+    cuota = data[2]
+    hora = data[3]
+    
+    mensaje = f"🎯 Próxima apuesta:\nPartido: {partido}\nCantidad: {cantidad}\nCuota: {cuota}\nHora: {hora}"
+    return mensaje
 
-def send_notification(bot, text):
-    """Envía mensaje al chat"""
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=text)
-        logger.info("✅ Notificación enviada: %s", text)
-    except Exception as e:
-        logger.error("❌ Error enviando notificación: %s", e)
-
-def check_and_notify(bot):
-    """Verifica hora y manda notificaciones"""
-    bet = get_next_bet()
-    if bet:
-        ahora = datetime.now(TZ)
-        hora_obj = datetime.strptime(bet["hora"], "%H:%M").replace(
-            year=ahora.year, month=ahora.month, day=ahora.day, tzinfo=TZ
-        )
-        diff = (hora_obj - ahora).total_seconds()
-        if 7200 <= diff <= 7260:
-            send_notification(bot, f"⏰ {bet['partido']} comienza en 2 horas.")
-        elif 1800 <= diff <= 1860:
-            send_notification(bot, f"⚠️ {bet['partido']} comienza en 30 minutos.")
-        elif 0 <= diff <= 60:
-            send_notification(bot, f"🔥 {bet['partido']} está por comenzar!")
-
+# Comando /start
 def start(update: Update, context: CallbackContext):
     update.message.reply_text("👋 Hola! Bot listo para comandos.")
 
+# Comando /next
 def next_bet(update: Update, context: CallbackContext):
-    bet = get_next_bet()
-    if bet:
-        update.message.reply_text(
-            f"🎯 Próxima apuesta:\n"
-            f"Partido: {bet['partido']}\n"
-            f"Cantidad: {bet['cantidad']}\n"
-            f"Cuota: {bet['cuota']}\n"
-            f"Hora: {bet['hora']}"
-        )
-    else:
-        update.message.reply_text("📭 No hay apuestas programadas.")
+    mensaje = obtener_proxima_apuesta()
+    update.message.reply_text(mensaje)
+
+# Comando /help
 def help_command(update: Update, context: CallbackContext):
     update.message.reply_text("🛠 Comandos disponibles:\n/start - Iniciar bot\n/next - Ver próxima apuesta\n/help - Ayuda\n/status - Estado del bot")
 
+# Comando /status
 def status_command(update: Update, context: CallbackContext):
     update.message.reply_text("✅ El bot está funcionando correctamente.")
+
+# Loop principal
 def main():
-    bot = Bot(TOKEN)
-    updater = Updater(bot=bot, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("next", next_bet))
+    updater = Updater(TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("next", next_bet))
+    dispatcher.add_handler(CommandHandler("help", help_command))
+    dispatcher.add_handler(CommandHandler("status", status_command))
+
     updater.start_polling()
-    logger.info("🤖 Bot iniciado y escuchando comandos...")
-    while True:
-        check_and_notify(bot)
-        time.sleep(60)
+    logger.info("Bot iniciado.")
+    updater.idle()
 
 if __name__ == "__main__":
     main()
