@@ -1,74 +1,74 @@
+import logging
 import os
 import json
-import logging
 import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, Bot
 from telegram.ext import Updater, CommandHandler, CallbackContext
-from oauth2client.service_account import ServiceAccountCredentials
 
-# --- CONFIGURACIÓN ---
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-SHEET_URL = os.environ.get('SHEET_URL')
-SHEET_CREDS = json.loads(os.environ.get('SHEET_CREDS'))
+# --- Configuración ---
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+SHEET_URL = os.getenv('SHEET_URL')
+SHEET_CREDS = json.loads(os.getenv('SHEET_CREDS'))
 
-# --- GOOGLE SHEETS ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(SHEET_CREDS, scope)
-client = gspread.authorize(creds)
-sheet = client.open_by_url(SHEET_URL).sheet1  # Usa la primera hoja
-
-# --- LOGGING ---
+# --- Logger ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- COMANDOS ---
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('¡Hola! Soy tu bot de apuestas 📊\nUsa /help para ver mis comandos.')
+# --- Conexión a Google Sheets ---
+def get_sheet():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(SHEET_CREDS, scope)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_url(SHEET_URL).sheet1
+    return sheet
 
-def help_command(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text(
-        "/start - Iniciar el bot\n"
-        "/help - Mostrar ayuda\n"
+# --- Comandos ---
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text("¡Hola! Soy tu bot de apuestas 🎯\nUsa /help para ver los comandos.")
+
+def help_command(update: Update, context: CallbackContext):
+    help_text = (
+        "/start - Inicia el bot\n"
+        "/help - Muestra este mensaje de ayuda\n"
         "/status - Ver el estado actual de las apuestas\n"
         "/next - Ver la próxima apuesta programada"
     )
+    update.message.reply_text(help_text)
 
-def status(update: Update, context: CallbackContext) -> None:
+def status(update: Update, context: CallbackContext):
     try:
+        sheet = get_sheet()
         data = sheet.get_all_values()
-        if not data or len(data) < 2:
-            update.message.reply_text("No hay apuestas registradas en la hoja.")
-            return
-
-        msg = "📋 *Apuestas actuales:*\n"
-        for row in data[1:]:  # Ignora encabezados
-            msg += f"\n🎯 Partido: {row[0]}\n💰 Monto: {row[1]}\n📅 Fecha: {row[2]}\n"
-        update.message.reply_text(msg, parse_mode='Markdown')
+        if data:
+            response = "📊 *Estado actual de apuestas:*\n"
+            for row in data[1:]:
+                response += f"{row[0]} - {row[1]} - {row[2]}\n"
+            update.message.reply_text(response, parse_mode="Markdown")
+        else:
+            update.message.reply_text("La hoja está vacía.")
     except Exception as e:
         logger.error(f"Error en /status: {e}")
-        update.message.reply_text("⚠️ Ocurrió un error al obtener el estado.")
+        update.message.reply_text("⚠️ No pude obtener el estado.")
 
-def next_bet(update: Update, context: CallbackContext) -> None:
+def next_bet(update: Update, context: CallbackContext):
     try:
+        sheet = get_sheet()
         data = sheet.get_all_values()
-        if len(data) < 2:
-            update.message.reply_text("No hay próximas apuestas programadas.")
-            return
-        next_row = data[1]  # La primera apuesta después del encabezado
-        msg = (
-            f"🔮 *Próxima apuesta:*\n\n"
-            f"🎯 Partido: {next_row[0]}\n"
-            f"💰 Monto: {next_row[1]}\n"
-            f"📅 Fecha: {next_row[2]}"
-        )
-        update.message.reply_text(msg, parse_mode='Markdown')
+        if len(data) > 1:
+            next_row = data[1]
+            response = f"🎯 Próxima apuesta:\nPartido: {next_row[0]}\nCantidad: {next_row[1]}\nHora: {next_row[2]}"
+            update.message.reply_text(response)
+        else:
+            update.message.reply_text("No hay próximas apuestas.")
     except Exception as e:
         logger.error(f"Error en /next: {e}")
-        update.message.reply_text("⚠️ Ocurrió un error al obtener la próxima apuesta.")
+        update.message.reply_text("⚠️ No pude obtener la próxima apuesta.")
 
-# --- NOTIFICACIONES AUTOMÁTICAS ---
-def send_notification(bot: Bot, message: str) -> None:
+# --- Notificaciones automáticas ---
+def send_notification(message: str):
+    bot = Bot(token=TELEGRAM_TOKEN)
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
     except Exception as e:
