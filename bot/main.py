@@ -9,70 +9,94 @@ from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, Bot
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
-# Configuración
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Variables de entorno
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SHEET_URL = os.getenv("SHEET_URL")
 SHEET_CREDS = os.getenv("SHEET_CREDS")
 
-# Google Sheets Auth
+# Autenticación con Google Sheets
 creds_dict = json.loads(SHEET_CREDS)
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
 credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(credentials)
 sheet = client.open_by_url(SHEET_URL).sheet1
 
-# Zona horaria
+# Zona horaria CDMX
 TZ = pytz.timezone("America/Mexico_City")
 
-# Función para obtener próxima apuesta
+# Función para obtener la próxima apuesta
 def obtener_proxima_apuesta():
-    rows = sheet.get_all_values()
-    if len(rows) < 2:
-        return "No hay apuestas registradas."
-    
-    data = rows[1]
-    partido = data[0]
-    cantidad = data[1]
-    cuota = data[2]
-    hora = data[3]
-    
-    mensaje = f"🎯 Próxima apuesta:\nPartido: {partido}\nCantidad: {cantidad}\nCuota: {cuota}\nHora: {hora}"
-    return mensaje
+    rows = sheet.get_all_values()[1:]  # Saltar encabezado
+    ahora = datetime.now(TZ)
 
-# Comando /start
+    for row in rows:
+        if len(row) < 4:
+            continue
+        partido, cantidad, cuota, hora_str = row
+        try:
+            hora_apuesta = datetime.strptime(hora_str.strip(), "%H:%M").replace(
+                year=ahora.year, month=ahora.month, day=ahora.day, tzinfo=TZ
+            )
+            if hora_apuesta > ahora:
+                return f"🎯 Próxima apuesta:\nPartido: {partido}\nCantidad: {cantidad}\nCuota: {cuota}\nHora: {hora_str}"
+        except ValueError:
+            continue
+    return "No hay apuestas próximas registradas."
+
+# Comandos de Telegram
 def start(update: Update, context: CallbackContext):
     update.message.reply_text("👋 Hola! Bot listo para comandos.")
 
-# Comando /next
-def next_bet(update: Update, context: CallbackContext):
+def help_command(update: Update, context: CallbackContext):
+    update.message.reply_text("/start - Iniciar\n/next - Ver próxima apuesta\n/status - Estado del bot\n/help - Ayuda")
+
+def next_command(update: Update, context: CallbackContext):
     mensaje = obtener_proxima_apuesta()
     update.message.reply_text(mensaje)
 
-# Comando /help
-def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("🛠 Comandos disponibles:\n/start - Iniciar bot\n/next - Ver próxima apuesta\n/help - Ayuda\n/status - Estado del bot")
-
-# Comando /status
 def status_command(update: Update, context: CallbackContext):
-    update.message.reply_text("✅ El bot está funcionando correctamente.")
+    update.message.reply_text("✅ Bot activo y funcionando correctamente.")
 
-# Loop principal
+# Envío automático cada minuto
+def enviar_apuesta_automatica(bot: Bot):
+    ya_enviado = set()
+    while True:
+        ahora = datetime.now(TZ).strftime("%H:%M")
+        rows = sheet.get_all_values()[1:]
+
+        for row in rows:
+            if len(row) < 4:
+                continue
+            partido, cantidad, cuota, hora_str = row
+            if hora_str.strip() == ahora and hora_str not in ya_enviado:
+                mensaje = f"🎯 Próxima apuesta:\nPartido: {partido}\nCantidad: {cantidad}\nCuota: {cuota}\nHora: {hora_str}"
+                bot.send_message(chat_id=CHAT_ID, text=mensaje)
+                ya_enviado.add(hora_str)
+        time.sleep(60)
+
+# Main
 def main():
     updater = Updater(TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+    dp = updater.dispatcher
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("next", next_bet))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CommandHandler("status", status_command))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("next", next_command))
+    dp.add_handler(CommandHandler("status", status_command))
 
+    # Lanzar bot
     updater.start_polling()
-    logger.info("Bot iniciado.")
-    updater.idle()
+
+    # Enviar automáticamente
+    enviar_apuesta_automatica(updater.bot)
 
 if __name__ == "__main__":
     main()
