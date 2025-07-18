@@ -80,7 +80,11 @@ def next_bet(update: Update, context: CallbackContext):
         )
     else:
         update.message.reply_text("📭 No hay apuestas programadas.")
+def help_command(update: Update, context: CallbackContext):
+    update.message.reply_text("🛠 Comandos disponibles:\n/start - Iniciar bot\n/next - Ver próxima apuesta\n/help - Ayuda\n/status - Estado del bot")
 
+def status_command(update: Update, context: CallbackContext):
+    update.message.reply_text("✅ El bot está funcionando correctamente.")
 def main():
     bot = Bot(TOKEN)
     updater = Updater(bot=bot, use_context=True)
