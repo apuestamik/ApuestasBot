@@ -1,111 +1,106 @@
-import os
 import logging
-import threading
-from datetime import datetime, timedelta
+import os
 import time
+from datetime import datetime, timedelta
+import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, Bot
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
-# Configuración básica
-TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
-CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
-GOOGLE_SHEET_ID = os.environ['GOOGLE_SHEET_ID']
-GOOGLE_CREDS_JSON = os.environ['GOOGLE_CREDS_JSON']
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Configurar logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Telegram Bot Token y Chat ID desde Heroku Config Vars
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Inicializar bot
-bot = Bot(token=TOKEN)
+# Google Sheets
+SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+CREDS = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", SCOPE)
+client = gspread.authorize(CREDS)
 
-# Configuración Google Sheets
-scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-creds = ServiceAccountCredentials.from_json_keyfile_name('google-credentials.json', scope)
-client = gspread.authorize(creds)
-sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+# ID de Google Sheet
+SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+SHEET_NAME = "Hoja 1"
+sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
-# Funciones
+# Zona horaria
+TZ = pytz.timezone("America/Mexico_City")
+
 def get_next_bet():
+    """Obtiene la próxima apuesta desde Google Sheets"""
+    data = sheet.get_all_values()
+    if len(data) < 2:
+        return None
+    partido, cantidad, cuota, hora = data[1]
+    return {
+        "partido": partido,
+        "cantidad": cantidad,
+        "cuota": cuota,
+        "hora": hora
+    }
+
+def send_notification(bot, text):
+    """Envía mensaje al chat"""
     try:
-        data = sheet.get_all_records()
-        if data:
-            bet = data[0]
-            partido = bet['Partido']
-            cantidad = bet['Cantidad']
-            cuota = bet['Cuota']
-            hora = bet['Hora']
-            return partido, cantidad, cuota, hora
-        else:
-            return None, None, None, None
+        bot.send_message(chat_id=CHAT_ID, text=text)
+        logger.info("Notificación enviada")
     except Exception as e:
-        logging.error(f"Error obteniendo datos de Google Sheets: {e}")
-        return None, None, None, None
+        logger.error(f"Error enviando notificación: {e}")
+
+def check_and_notify(bot):
+    """Verifica el horario y envía notificaciones"""
+    bet = get_next_bet()
+    if bet:
+        hora_apuesta = datetime.strptime(bet["hora"], "%H:%M").replace(
+            year=datetime.now(TZ).year,
+            month=datetime.now(TZ).month,
+            day=datetime.now(TZ).day,
+            tzinfo=TZ
+        )
+
+        ahora = datetime.now(TZ)
+        diff = (hora_apuesta - ahora).total_seconds()
+
+        if 7200 <= diff <= 7500:  # 2 horas antes
+            send_notification(bot, f"⏰ Recuerda: {bet['partido']} comienza en 2 horas.")
+        elif 1800 <= diff <= 2100:  # 30 minutos antes
+            send_notification(bot, f"⚠️ Alerta: {bet['partido']} comienza en 30 minutos.")
+        elif 0 <= diff <= 60:  # justo en la hora
+            send_notification(bot, f"🔥 La pelea {bet['partido']} está por comenzar!")
 
 def start(update: Update, context: CallbackContext):
     update.message.reply_text("👋 Hola! Bot listo para comandos.")
 
 def next_bet(update: Update, context: CallbackContext):
-    partido, cantidad, cuota, hora = get_next_bet()
-    if partido:
-        mensaje = f"🎯 Próxima apuesta: {partido}, {cantidad}, cuota {cuota}, {hora}"
+    bet = get_next_bet()
+    if bet:
+        update.message.reply_text(
+            f"🎯 Próxima apuesta:\n"
+            f"Partido: {bet['partido']}\n"
+            f"Cantidad: {bet['cantidad']}\n"
+            f"Cuota: {bet['cuota']}\n"
+            f"Hora: {bet['hora']}"
+        )
     else:
-        mensaje = "⚠️ No hay próxima apuesta registrada en el Google Sheet."
-    update.message.reply_text(mensaje)
+        update.message.reply_text("📭 No hay apuestas programadas.")
 
-def status(update: Update, context: CallbackContext):
-    try:
-        data = sheet.get_all_records()
-        if data:
-            mensaje = "📊 Estado actual de apuestas:\n"
-            for row in data:
-                mensaje += f"{row['Partido']} - {row['Cantidad']} - cuota {row['Cuota']} - {row['Hora']}\n"
-        else:
-            mensaje = "📊 No hay apuestas registradas en el Google Sheet."
-    except Exception as e:
-        mensaje = f"❌ Error al obtener el estado: {e}"
-    update.message.reply_text(mensaje)
+def main():
+    bot = Bot(TOKEN)
+    updater = Updater(bot=bot, use_context=True)
+    dp = updater.dispatcher
 
-def send_alerts():
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("next", next_bet))
+
+    updater.start_polling()
+
+    logger.info("Bot iniciado y monitoreando notificaciones")
     while True:
-        partido, cantidad, cuota, hora = get_next_bet()
-        if partido and hora:
-            try:
-                fight_time = datetime.strptime(hora, "%H:%M").replace(
-                    year=datetime.now().year, month=datetime.now().month, day=datetime.now().day
-                )
-                now = datetime.now()
-                if fight_time < now:
-                    fight_time += timedelta(days=1)  # Ajusta si la hora ya pasó hoy
+        check_and_notify(bot)
+        time.sleep(60)  # checar cada minuto
 
-                delta_2h = fight_time - timedelta(hours=2)
-                delta_30m = fight_time - timedelta(minutes=30)
-
-                # Espera hasta las alertas
-                while datetime.now() < delta_2h:
-                    time.sleep(60)
-                bot.send_message(chat_id=CHAT_ID, text=f"⏰ La pelea '{partido}' es en 2 horas. Prepara el cash out.")
-                
-                while datetime.now() < delta_30m:
-                    time.sleep(60)
-                bot.send_message(chat_id=CHAT_ID, text=f"🔥 Última alerta! '{partido}' comienza en 30 minutos.")
-            except Exception as e:
-                logging.error(f"Error en las alertas: {e}")
-        time.sleep(300)  # Revisa cada 5 minutos
-
-# Configurar comandos
-updater = Updater(token=TOKEN, use_context=True)
-dp = updater.dispatcher
-dp.add_handler(CommandHandler("start", start))
-dp.add_handler(CommandHandler("next", next_bet))
-dp.add_handler(CommandHandler("status", status))
-
-# Iniciar alertas en hilo separado
-alert_thread = threading.Thread(target=send_alerts)
-alert_thread.daemon = True
-alert_thread.start()
-
-# Iniciar bot
-updater.start_polling()
-updater.idle()
+if __name__ == '__main__':
+    main()
