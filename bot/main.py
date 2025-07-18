@@ -1,47 +1,54 @@
 import os
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+import json
+import telebot
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# Comando /start
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text(
-        "👋 ¡Hola! Soy tu bot de apuestas. Envíame /help para ver mis comandos."
-    )
+# Cargar variables de entorno
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+SHEET_URL = os.environ.get("SHEET_URL")
+CREDENTIALS = json.loads(os.environ.get("GOOGLE_SHEETS_CREDENTIALS"))
 
-# Comando /help
-def help_command(update: Update, context: CallbackContext):
-    texto = (
-        "📋 *Comandos disponibles:*\n"
-        "/start - Mensaje de bienvenida\n"
-        "/help - Esta ayuda\n"
-        "/status - Estado de tu banca y apuestas\n"
-        "/next - Próxima alerta programada\n"
-    )
-    update.message.reply_text(texto, parse_mode="Markdown")
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Comando /status (ejemplo de respuesta estática)
-def status(update: Update, context: CallbackContext):
-    # Aquí podrías leer tu Google Sheet para sacar datos reales
-    update.message.reply_text(
-        "💰 Estado de banca:\n"
-        "- Banca actual: $2,000 MXN\n"
-        "- Apuestas abiertas: 0\n"
-    )
+# Autenticación con Google Sheets
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+credentials = ServiceAccountCredentials.from_json_keyfile_dict(CREDENTIALS, scope)
+gc = gspread.authorize(credentials)
+sheet = gc.open_by_url(SHEET_URL).sheet1
 
-def main():
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        raise RuntimeError("No encontré la variable TELEGRAM_TOKEN")
+# /start
+@bot.message_handler(commands=["start"])
+def start(message):
+    bot.reply_to(message, "👋 ¡Hola! Soy tu bot de apuestas. Usa /help para ver mis comandos.")
 
-    updater = Updater(token)
-    dp = updater.dispatcher
+# /help
+@bot.message_handler(commands=["help"])
+def help(message):
+    bot.reply_to(message, "📋 Comandos disponibles:\n/start - Iniciar bot\n/status - Ver banca y apuestas\n/next - Próxima pelea")
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("status", status))
+# /status
+@bot.message_handler(commands=["status"])
+def status(message):
+    rows = sheet.get_all_records()
+    banca_total = sum([row["Apuesta"] for row in rows])
+    bot.reply_to(message, f"💰 Banca actual: ${banca_total}\nApuestas activas: {len(rows)}")
 
-    updater.start_polling()
-    updater.idle()
+# /next
+@bot.message_handler(commands=["next"])
+def next_fight(message):
+    rows = sheet.get_all_records()
+    for row in rows:
+        if row["Resultado"] == "Pendiente":
+            response = (
+                f"📅 Próxima pelea: {row['Pelea']}\n"
+                f"📆 Fecha: {row['Fecha']}\n"
+                f"💵 Momio 1: {row['Momio 1']} | Momio 2: {row['Momio 2']}\n"
+                f"💸 Apuesta: ${row['Apuesta']}"
+            )
+            bot.reply_to(message, response)
+            return
+    bot.reply_to(message, "🎉 No hay apuestas pendientes.")
 
-if __name__ == "__main__":
-    main()
+print("✅ Bot está corriendo...")
+bot.polling()
