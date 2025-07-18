@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import json
 from datetime import datetime, timedelta
 import pytz
 import gspread
@@ -8,23 +9,22 @@ from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, Bot
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
-# Logging
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Telegram Bot Token y Chat ID desde Heroku Config Vars
+# Variables de entorno
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SHEET_URL = os.getenv("SHEET_URL")
+SHEET_CREDS = os.getenv("SHEET_CREDS")
 
-# Google Sheets
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-CREDS = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", SCOPE)
-client = gspread.authorize(CREDS)
-
-# ID de Google Sheet
-SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-SHEET_NAME = "Hoja 1"
-sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+# Credenciales de Google Sheets desde variable de entorno
+creds_dict = json.loads(SHEET_CREDS)
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+client = gspread.authorize(credentials)
+sheet = client.open_by_url(SHEET_URL).sheet1
 
 # Zona horaria
 TZ = pytz.timezone("America/Mexico_City")
@@ -36,45 +36,43 @@ def get_next_bet():
         return None
     partido, cantidad, cuota, hora = data[1]
     return {
-        "partido": partido,
-        "cantidad": cantidad,
-        "cuota": cuota,
-        "hora": hora
+        "partido": partido.strip(),
+        "cantidad": cantidad.strip(),
+        "cuota": cuota.strip(),
+        "hora": hora.strip()
     }
 
 def send_notification(bot, text):
     """Envía mensaje al chat"""
     try:
         bot.send_message(chat_id=CHAT_ID, text=text)
-        logger.info("Notificación enviada")
+        logger.info("✅ Notificación enviada: %s", text)
     except Exception as e:
-        logger.error(f"Error enviando notificación: {e}")
+        logger.error("❌ Error enviando notificación: %s", e)
 
 def check_and_notify(bot):
-    """Verifica el horario y envía notificaciones"""
+    """Verifica la hora y envía notificaciones"""
     bet = get_next_bet()
     if bet:
-        hora_apuesta = datetime.strptime(bet["hora"], "%H:%M").replace(
-            year=datetime.now(TZ).year,
-            month=datetime.now(TZ).month,
-            day=datetime.now(TZ).day,
-            tzinfo=TZ
-        )
-
         ahora = datetime.now(TZ)
-        diff = (hora_apuesta - ahora).total_seconds()
+        hora_obj = datetime.strptime(bet["hora"], "%H:%M").replace(
+            year=ahora.year, month=ahora.month, day=ahora.day, tzinfo=TZ
+        )
+        diff = (hora_obj - ahora).total_seconds()
 
-        if 7200 <= diff <= 7500:  # 2 horas antes
+        if 7200 <= diff <= 7260:  # 2h antes
             send_notification(bot, f"⏰ Recuerda: {bet['partido']} comienza en 2 horas.")
-        elif 1800 <= diff <= 2100:  # 30 minutos antes
+        elif 1800 <= diff <= 1860:  # 30 min antes
             send_notification(bot, f"⚠️ Alerta: {bet['partido']} comienza en 30 minutos.")
         elif 0 <= diff <= 60:  # justo en la hora
             send_notification(bot, f"🔥 La pelea {bet['partido']} está por comenzar!")
 
 def start(update: Update, context: CallbackContext):
+    """Comando /start"""
     update.message.reply_text("👋 Hola! Bot listo para comandos.")
 
 def next_bet(update: Update, context: CallbackContext):
+    """Comando /next"""
     bet = get_next_bet()
     if bet:
         update.message.reply_text(
@@ -88,6 +86,7 @@ def next_bet(update: Update, context: CallbackContext):
         update.message.reply_text("📭 No hay apuestas programadas.")
 
 def main():
+    """Main loop"""
     bot = Bot(TOKEN)
     updater = Updater(bot=bot, use_context=True)
     dp = updater.dispatcher
@@ -96,11 +95,11 @@ def main():
     dp.add_handler(CommandHandler("next", next_bet))
 
     updater.start_polling()
+    logger.info("🤖 Bot iniciado y escuchando comandos...")
 
-    logger.info("Bot iniciado y monitoreando notificaciones")
     while True:
         check_and_notify(bot)
-        time.sleep(60)  # checar cada minuto
+        time.sleep(60)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
