@@ -1,135 +1,132 @@
-import logging
 import os
-import time
 import gspread
 import pytz
+import time
+import logging
 from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Bot
-from telegram.ext import Updater, CommandHandler, CallbackContext
-from telegram.update import Update
+from telegram.ext import Updater, CommandHandler
 
-# Configuración de logs
+# --- Configuración ---
+SPREADSHEET_NAME = "Apuestas Telegram"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# --- Credenciales de Google ---
+SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
+CLIENT = gspread.authorize(CREDS)
+
+# --- Zona horaria CDMX ---
+CDMX_TZ = pytz.timezone("America/Mexico_City")
+
+# --- Inicializar logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Credenciales y configuraciones
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-GOOGLE_SHEET_NAME = "Apuestas"
-TIMEZONE = pytz.timezone("America/Mexico_City")
+# --- Leer datos del sheet ---
+def get_active_fights():
+    sheet = CLIENT.open(SPREADSHEET_NAME).sheet1
+    data = sheet.get_all_records()
+    upcoming = []
+    now = datetime.now(CDMX_TZ)
 
-# Autenticación con Google Sheets
-def get_sheet():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("google-credentials.json", scope)
-    client = gspread.authorize(creds)
-    sheet = client.open(GOOGLE_SHEET_NAME).sheet1
-    return sheet
+    for row in data:
+        if row["Estatus"].strip().lower() != "activa":
+            continue
+        try:
+            fight_time = datetime.strptime(f"{row['Fecha']} {row['Hora (CDMX)']}", "%Y-%m-%d %H:%M")
+            fight_time = CDMX_TZ.localize(fight_time)
+            if fight_time > now:
+                upcoming.append({
+                    "datetime": fight_time,
+                    "pelea": row["Pelea"],
+                    "monto": row["Monto Apostado (MXN)"],
+                    "cuota": row["Cuota"]
+                })
+        except Exception as e:
+            logger.warning(f"Error en fila: {row} -> {e}")
+    return upcoming
 
-# Formato de mensaje
-def format_alert(fight, time_str):
-    return f"""📣 *ALERTA DE APUESTA*
+# --- Enviar mensaje de alerta ---
+def send_alert(bot, fight):
+    mensaje = f"""
+⏰ *Alerta de apuesta!*
+{fight['pelea']} inicia pronto.
+Cantidad: {fight['monto']} - Cuota: {fight['cuota']}
+Hora de inicio: {fight['datetime'].strftime('%H:%M')}
+⚠️ ¡Verifica en Betsson! Posible cash out disponible en los próximos 5 minutos.
+"""
+    bot.send_message(chat_id=CHAT_ID, text=mensaje, parse_mode='Markdown')
 
-🥊 Pelea: *{fight}*
-⏰ Empieza en {time_str}
-⚠️ ¡Verifica en Betsson! Posible cash out disponible en los próximos 5 minutos."""
-
-# Enviar mensaje a Telegram
-def send_telegram_message(message):
-    bot = Bot(token=TELEGRAM_TOKEN)
-    bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
-
-# Comando /start
-def start(update: Update, context: CallbackContext):
+# --- Comandos Telegram ---
+def start(update, context):
     update.message.reply_text("🤖 Bot de apuestas activado. Te avisaré antes de cada pelea.")
 
-# Comando /help
-def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("/start - Activar bot\n/next - Próximas peleas\n/status - Ver estado")
-
-# Comando /status
-def status(update: Update, context: CallbackContext):
-    sheet = get_sheet()
-    rows = sheet.get_all_records()
-    active = [row for row in rows if row["Estatus"].strip().lower() == "activa"]
-    if not active:
-        update.message.reply_text("No hay apuestas activas.")
+def status(update, context):
+    peleas = get_active_fights()
+    if not peleas:
+        update.message.reply_text("No hay peleas activas registradas.")
         return
-    msg = "📋 *Apuestas Activas:*\n"
-    for row in active:
-        msg += f"\n🥊 {row['Pelea']} - {row['Fecha']} a las {row['Hora (CDMX)']} - Cuota: {row['Cuota']}"
-    update.message.reply_text(msg, parse_mode="Markdown")
+    texto = "📆 *Próximas peleas registradas:*\n"
+    for f in peleas:
+        texto += f"- {f['pelea']} a las {f['datetime'].strftime('%H:%M')} (CDMX)\n"
+    update.message.reply_text(texto, parse_mode='Markdown')
 
-# Comando /next
-def next(update: Update, context: CallbackContext):
-    now = datetime.now(TIMEZONE)
-    sheet = get_sheet()
-    rows = sheet.get_all_records()
-    upcoming = []
-    for row in rows:
-        if row["Estatus"].strip().lower() != "activa":
-            continue
-        fight_time = TIMEZONE.localize(datetime.strptime(f"{row['Fecha']} {row['Hora (CDMX)']}", "%Y-%m-%d %H:%M"))
-        if fight_time > now:
-            upcoming.append((fight_time, row["Pelea"]))
-    upcoming.sort()
-    if not upcoming:
-        update.message.reply_text("No hay próximas peleas.")
-        return
-    next_fight = upcoming[0]
-    update.message.reply_text(f"⏭️ Próxima pelea: {next_fight[1]} a las {next_fight[0].strftime('%H:%M %p')}", parse_mode="Markdown")
+def next_fight(update, context):
+    peleas = sorted(get_active_fights(), key=lambda x: x['datetime'])
+    if peleas:
+        f = peleas[0]
+        texto = f"""
+📢 *Siguiente pelea:*
+{f['pelea']}
+Cantidad: {f['monto']} - Cuota: {f['cuota']}
+Hora de inicio: {f['datetime'].strftime('%H:%M')} (CDMX)
+"""
+        update.message.reply_text(texto, parse_mode='Markdown')
+    else:
+        update.message.reply_text("No hay peleas activas registradas.")
 
-# Revisión periódica de alertas
-def check_alerts():
-    sheet = get_sheet()
-    rows = sheet.get_all_records()
-    now = datetime.now(TIMEZONE)
-
-    for row in rows:
-        if row["Estatus"].strip().lower() != "activa":
-            continue
-        try:
-            fight_time = TIMEZONE.localize(datetime.strptime(f"{row['Fecha']} {row['Hora (CDMX)']}", "%Y-%m-%d %H:%M"))
-        except Exception as e:
-            logger.warning(f"Error con pelea: {row['Pelea']}, error: {e}")
-            continue
-
-        time_diff = (fight_time - now).total_seconds()
-
-        # Tiempos de alerta: 2 horas, 30 minutos, 10 minutos antes
-        alerts = {
-            7200: "2 horas",
-            1800: "30 minutos",
-            600: "10 minutos"
-        }
-
-        for seconds, label in alerts.items():
-            if abs(time_diff - seconds) < 30:  # 30 segundos de margen
-                message = format_alert(row["Pelea"], label)
-                send_telegram_message(message)
-
-# Main loop
-def main():
-    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("status", status))
-    dp.add_handler(CommandHandler("next", next))
-
-    updater.start_polling()
-
-    logger.info("Bot corriendo...")
-
+# --- Loop de notificaciones ---
+def notificacion_loop(bot):
+    pendientes = {}
     while True:
         try:
-            check_alerts()
+            peleas = get_active_fights()
+            now = datetime.now(CDMX_TZ)
+            for f in peleas:
+                t = f["datetime"]
+                clave = f"{f['pelea']}|{t.strftime('%Y-%m-%d %H:%M')}"
+                if clave not in pendientes:
+                    pendientes[clave] = set()
+
+                for delta in [120, 30, 10]:
+                    alerta = t - timedelta(minutes=delta)
+                    if alerta <= now and delta not in pendientes[clave]:
+                        send_alert(bot, f)
+                        pendientes[clave].add(delta)
             time.sleep(60)
         except Exception as e:
-            logger.error(f"Error en main loop: {e}")
+            logger.error(f"Error en loop: {e}")
             time.sleep(60)
 
-if __name__ == "__main__":
+# --- Main ---
+def main():
+    bot = Bot(token=TELEGRAM_TOKEN)
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("status", status))
+    dp.add_handler(CommandHandler("next", next_fight))
+    updater.start_polling()
+
+    # Iniciar loop en segundo plano
+    import threading
+    thread = threading.Thread(target=notificacion_loop, args=(bot,))
+    thread.start()
+
+    updater.idle()
+
+if __name__ == '__main__':
     main()
