@@ -60,7 +60,7 @@ def get_active_fights():
     return sorted(fights, key=lambda x: x["hora"])
 
 def send_alert(pelea, tiempo):
-    mensaje = f"⏰ *Alerta de pelea:* {pelea}
+    mensaje = f"⏰ *Alerta de pelea:* {pelea}"
 📍 *Tiempo restante:* {tiempo}
 
 ⚠️ ¡Verifica en Betsson! Posible cash out disponible en los próximos 5 minutos."
