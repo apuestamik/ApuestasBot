@@ -1,97 +1,132 @@
-import logging
 import os
+import logging
 import pytz
+import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext, JobQueue
+from telegram import Bot, Update
+from telegram.ext import CommandHandler, Updater, CallbackContext
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Configuración de logging
+# Configuración del logger
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Autenticación con Google Sheets
+# Variables de entorno
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+GOOGLE_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME")
+SHEET_CREDS = os.environ.get("SHEET_CREDS")
+
+# Configurar conexión con Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-client = gspread.authorize(creds)
+credentials = ServiceAccountCredentials.from_json_keyfile_dict(eval(SHEET_CREDS), scope)
+client = gspread.authorize(credentials)
+sheet = client.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_NAME)
 
-# Acceso al Google Sheet
-sheet = client.open("Apuestas Telegram").worksheet("Apuestas Telegram")
+# Zona horaria de Ciudad de México
+CDMX_TZ = pytz.timezone("America/Mexico_City")
 
-# Zona horaria de CDMX
-CDMX = pytz.timezone("America/Mexico_City")
+bot = Bot(token=TELEGRAM_TOKEN)
 
-# Función para convertir hora CDMX a UTC
-def cdmx_to_utc(cdmx_time_str):
-    try:
-        naive_time = datetime.strptime(cdmx_time_str, "%H:%M")
-        now = datetime.now(CDMX).date()
-        cdmx_time = CDMX.localize(datetime.combine(now, naive_time.time()))
-        return cdmx_time.astimezone(pytz.utc)
-    except Exception as e:
-        logger.error(f"Error al convertir hora: {e}")
-        return None
-
-# Función para obtener próximas peleas activas
 def get_active_fights():
     data = sheet.get_all_records()
-    upcoming_fights = []
+    now = datetime.datetime.now(CDMX_TZ)
+    fights = []
+
     for row in data:
-        if row["Estatus"].strip().lower() == "activa":
-            fight_time = cdmx_to_utc(row["Hora (CDMX)"])
-            if fight_time:
-                upcoming_fights.append((row["Pelea"], fight_time, row["Fecha"]))
-    return upcoming_fights
+        if row.get("Estatus", "").strip().lower() == "activa":
+            fecha = row.get("Fecha")
+            hora = row.get("Hora (CDMX)")
+            pelea = row.get("Pelea")
 
-# Función para enviar notificaciones
-def send_notifications(context: CallbackContext):
-    chat_id = context.job.context
+            if not fecha or not hora or not pelea:
+                continue
+
+            try:
+                fight_time_str = f"{fecha} {hora}"
+                fight_time = CDMX_TZ.localize(datetime.datetime.strptime(fight_time_str, "%Y-%m-%d %H:%M"))
+                time_diff = (fight_time - now).total_seconds()
+
+                if time_diff > 0:
+                    fights.append({
+                        "pelea": pelea,
+                        "hora": fight_time,
+                        "tiempo_faltante": time_diff
+                    })
+            except Exception as e:
+                logging.error(f"Error procesando fila: {e}")
+
+    return sorted(fights, key=lambda x: x["hora"])
+
+def send_alert(pelea, tiempo):
+    mensaje = f"⏰ *Alerta de pelea:* {pelea}
+📍 *Tiempo restante:* {tiempo}
+
+⚠️ ¡Verifica en Betsson! Posible cash out disponible en los próximos 5 minutos."
+    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje, parse_mode="Markdown")
+
+def check_and_notify():
     fights = get_active_fights()
-    now = datetime.now(pytz.utc)
-    for pelea, hora_utc, fecha in fights:
-        diff = (hora_utc - now).total_seconds()
-        if 0 < diff <= 7200:
-            context.bot.send_message(chat_id=chat_id, text=f"⏰ Pelea próxima: {pelea} a las {hora_utc.astimezone(CDMX).strftime('%H:%M')} CDMX\n⚠️ ¡Verifica en Betsson! Posible cash out disponible en los próximos 5 minutos.")
+    now = datetime.datetime.now(CDMX_TZ)
 
-# Comandos
+    for fight in fights:
+        tiempo_restante = (fight["hora"] - now).total_seconds()
+        if 7180 < tiempo_restante < 7220:  # 2h antes
+            send_alert(fight["pelea"], "2 horas")
+        elif 1780 < tiempo_restante < 1820:  # 30 min antes
+            send_alert(fight["pelea"], "30 minutos")
+        elif 580 < tiempo_restante < 620:  # 10 min antes
+            send_alert(fight["pelea"], "10 minutos")
+
+# Comandos de Telegram
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("🤖 Bot activo. Recibirás alertas de apuestas.")
-
-def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("/start - Iniciar\n/status - Estado del bot\n/next - Próxima pelea\n/help - Ayuda")
+    update.message.reply_text("Bot activo. Tendrás alertas de próximas apuestas.")
 
 def status(update: Update, context: CallbackContext):
-    update.message.reply_text("✅ Bot en línea y monitoreando peleas activas.")
+    peleas = get_active_fights()
+    if not peleas:
+        update.message.reply_text("No hay peleas activas registradas.")
+    else:
+        mensaje = "*Peleas activas:*
+"
+        for p in peleas:
+            hora_str = p["hora"].strftime("%Y-%m-%d %H:%M")
+            mensaje += f"- {p['pelea']} a las {hora_str} CDMX
+"
+        update.message.reply_text(mensaje, parse_mode="Markdown")
 
 def next_fight(update: Update, context: CallbackContext):
-    fights = get_active_fights()
-    if fights:
-        pelea, hora_utc, fecha = fights[0]
-        hora_cdmx = hora_utc.astimezone(CDMX).strftime('%H:%M')
-        update.message.reply_text(f"📅 Próxima pelea: {pelea}\n🕒 Hora: {hora_cdmx} CDMX\n📌 Fecha: {fecha}")
+    peleas = get_active_fights()
+    if not peleas:
+        update.message.reply_text("No hay peleas activas.")
     else:
-        update.message.reply_text("📭 No hay peleas activas registradas.")
+        p = peleas[0]
+        hora_str = p["hora"].strftime("%Y-%m-%d %H:%M")
+        mensaje = f"📢 Próxima pelea:
+{p['pelea']} a las {hora_str} hora CDMX"
+        update.message.reply_text(mensaje)
 
-def main():
-    token = os.getenv("TELEGRAM_TOKEN")
-    chat_id = os.getenv("CHAT_ID")
+def help_command(update: Update, context: CallbackContext):
+    mensaje = "Comandos disponibles:
+/start - Activar bot
+/status - Ver peleas activas
+/next - Siguiente pelea
+/help - Ver ayuda"
+    update.message.reply_text(mensaje)
 
-    updater = Updater(token)
-    dispatcher = updater.dispatcher
+# Configuración del bot
+updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+dp = updater.dispatcher
+dp.add_handler(CommandHandler("start", start))
+dp.add_handler(CommandHandler("status", status))
+dp.add_handler(CommandHandler("next", next_fight))
+dp.add_handler(CommandHandler("help", help_command))
 
-    # Comandos
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CommandHandler("status", status))
-    dispatcher.add_handler(CommandHandler("next", next_fight))
+# Programar verificación periódica
+scheduler = BackgroundScheduler()
+scheduler.add_job(check_and_notify, "interval", minutes=1)
+scheduler.start()
 
-    # Tareas programadas
-    job_queue: JobQueue = updater.job_queue
-    job_queue.run_repeating(send_notifications, interval=600, first=10, context=chat_id)
-
-    updater.start_polling()
-    updater.idle()
-
-if __name__ == "__main__":
-    main()
+updater.start_polling()
+updater.idle()
