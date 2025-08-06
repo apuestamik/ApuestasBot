@@ -1,119 +1,157 @@
-import os
 import logging
+import os
 import pytz
 import gspread
-from datetime import datetime
-from apscheduler.schedulers.background import BackgroundScheduler
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+from datetime import datetime, timedelta
 from oauth2client.service_account import ServiceAccountCredentials
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram import Update
 
-# Configuración básica
+# Configuración básica del logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Zona horaria de Ciudad de México
+# Variables de entorno
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
+SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME')
+
+# Zona horaria de CDMX
 CDMX_TZ = pytz.timezone("America/Mexico_City")
 
-# Variables de entorno
-SHEET_CREDS = os.getenv("SHEET_CREDS")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME")
-
 # Autenticación con Google Sheets
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials = ServiceAccountCredentials.from_json_keyfile_dict(eval(SHEET_CREDS), scope)
-gc = gspread.authorize(credentials)
-sheet = gc.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_NAME)
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+creds_dict = eval(os.getenv('SHEET_CREDS'))
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+client = gspread.authorize(creds)
+sheet = client.open_by_key(SHEET_ID)
+apuestas_sheet = sheet.worksheet(SHEET_NAME)
+checklist_sheet = sheet.worksheet("Checklist")
 
-# Obtener peleas activas desde la hoja
-def get_fights():
-    data = sheet.get_all_records()
-    fights = []
-    now = datetime.now(CDMX_TZ)
+# Función para obtener apuestas activas
+def get_apuestas_activas():
+    records = apuestas_sheet.get_all_records()
+    activas = []
+    for row in records:
+        if row.get("Estatus", "").strip().lower() == "activa":
+            activas.append(row)
+    return activas
 
-    for row in data:
-        try:
-            if row["Estatus"].lower() != "activa":
-                continue
-            pelea = row["Pelea"]
-            fecha = row["Fecha"]
-            hora = row["Hora (CDMX)"]
-            fight_time_str = f"{fecha} {hora}"
-            fight_time = CDMX_TZ.localize(datetime.strptime(fight_time_str, "%Y-%m-%d %H:%M"))
-            time_diff = (fight_time - now).total_seconds()
-            if time_diff > 0:
-                fights.append({
-                    "pelea": pelea,
-                    "hora": fight_time,
-                    "tiempo_faltante": time_diff
-                })
-        except Exception as e:
-            logging.error(f"Error procesando fila: {e}")
-
-    return sorted(fights, key=lambda x: x["hora"])
-
-# Enviar alerta al canal
-def send_alert(pelea, tiempo):
-    mensaje = f"🥊 *Alerta de pelea:* {pelea}\n📍 *Tiempo restante:* {tiempo}\n\n⚠️ ¡Verifica en Betsson! Posible cash out disponible en los próximos 5 minutos."
-    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje, parse_mode="Markdown")
-
-# Verificar si hay peleas próximas y notificar
-def check_and_notify():
-    fights = get_fights()
-    now = datetime.now(CDMX_TZ)
-
-    for f in fights:
-        minutos = int(f["tiempo_faltante"] // 60)
-        if minutos in [120, 30, 10]:  # 2h, 30min, 10min antes
-            send_alert(f["pelea"], f"{minutos} minutos")
-
-# Comando /start
+# Comandos de bot
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("✅ Bot de apuestas activado y listo para enviar notificaciones.")
+    update.message.reply_text("🤖 Bot de apuestas activo. Usa /next para ver la siguiente pelea.")
 
-# Comando /status
-def status(update: Update, context: CallbackContext):
-    fights = get_fights()
-    if not fights:
-        update.message.reply_text("No hay peleas activas registradas.")
-    else:
-        mensaje = "*Peleas activas:*\n"
-        for f in fights:
-            hora_str = f["hora"].strftime("%Y-%m-%d %H:%M")
-            mensaje += f"- {f['pelea']} a las {hora_str} hora CDMX\n"
-        update.message.reply_text(mensaje, parse_mode="Markdown")
-
-# Comando /next
-def next_fight(update: Update, context: CallbackContext):
-    fights = get_fights()
-    if not fights:
-        update.message.reply_text("No hay peleas próximas registradas.")
-    else:
-        p = fights[0]
-        hora_str = p["hora"].strftime("%Y-%m-%d %H:%M")
-        mensaje = f"📯 Próxima pelea: {p['pelea']} a las {hora_str} hora CDMX"
-        update.message.reply_text(mensaje)
-
-# Comando /help
 def help_command(update: Update, context: CallbackContext):
-    mensaje = "Comandos disponibles:\n/start – Activar bot\n/status – Ver peleas activas\n/next – Siguiente pelea\n/help – Ver ayuda"
+    update.message.reply_text("/start - Iniciar bot\n/next - Ver siguiente pelea\n/status - Ver estado del sistema\n/help - Ayuda")
+
+def status(update: Update, context: CallbackContext):
+    update.message.reply_text("✅ Sistema funcionando correctamente y monitoreando peleas activas.")
+
+def next_fight(update: Update, context: CallbackContext):
+    activas = get_apuestas_activas()
+    if not activas:
+        update.message.reply_text("⛔ No hay peleas activas registradas.")
+        return
+
+    activas.sort(key=lambda x: x['Fecha'] + ' ' + x['Hora (CDMX)'])
+    pelea = activas[0]
+    mensaje = f"📅 Próxima pelea: {pelea['Pelea']}\n🕒 Hora: {pelea['Hora (CDMX)']}\n💰 Monto: ${pelea['Monto Apostado (MXN)']}\n🔥 Cuota: {pelea['Cuota']}"
     update.message.reply_text(mensaje)
 
-# Inicializar bot
-updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
-dp = updater.dispatcher
-dp.add_handler(CommandHandler("start", start))
-dp.add_handler(CommandHandler("status", status))
-dp.add_handler(CommandHandler("next", next_fight))
-dp.add_handler(CommandHandler("help", help_command))
+# Envío de alertas programadas
+def enviar_alerta(context: CallbackContext):
+    now_utc = datetime.now(pytz.utc)
+    activas = get_apuestas_activas()
+    for pelea in activas:
+        try:
+            pelea_dt_cdmx = datetime.strptime(f"{pelea['Fecha']} {pelea['Hora (CDMX)']}", "%d-%b-%Y %H:%M")
+            pelea_dt_cdmx = CDMX_TZ.localize(pelea_dt_cdmx)
+            pelea_dt_utc = pelea_dt_cdmx.astimezone(pytz.utc)
+            delta = pelea_dt_utc - now_utc
 
-# Programar verificación periódica
-bot = updater.bot
-scheduler = BackgroundScheduler()
-scheduler.add_job(check_and_notify, "interval", minutes=1)
-scheduler.start()
+            mensaje_alerta = f"⚠️ ¡Verifica en Betsson! Posible cash out disponible en los próximos 5 minutos.\n📍 {pelea['Pelea']} - {pelea['Hora (CDMX)']}"
 
-updater.start_polling()
-updater.idle()
+            if timedelta(minutes=118) < delta <= timedelta(minutes=122):
+                context.bot.send_message(chat_id=CHAT_ID, text="⏰ 2 HORAS PARA LA PELEA\n" + mensaje_alerta)
+            elif timedelta(minutes=28) < delta <= timedelta(minutes=32):
+                context.bot.send_message(chat_id=CHAT_ID, text="⏰ 30 MINUTOS PARA LA PELEA\n" + mensaje_alerta)
+            elif timedelta(minutes=8) < delta <= timedelta(minutes=12):
+                context.bot.send_message(chat_id=CHAT_ID, text="⏰ 10 MINUTOS PARA LA PELEA\n" + mensaje_alerta)
+        except Exception as e:
+            logging.error(f"Error procesando pelea: {pelea.get('Pelea', 'desconocida')} - {e}")
+
+# Nueva función: agregar fila al checklist
+def agregar_a_checklist(pelea_data: dict):
+    fila = [
+        pelea_data.get("Peleador A", ""),
+        pelea_data.get("Peleador B", ""),
+        pelea_data.get("Fecha", ""),
+        pelea_data.get("Hora CDMX", ""),
+        pelea_data.get("Estilo A", ""),
+        pelea_data.get("Estilo B", ""),
+        pelea_data.get("Campamento A", ""),
+        pelea_data.get("Fallos Rival", ""),
+        pelea_data.get("Estado Mental", ""),
+        pelea_data.get("Ventaja Física", ""),
+        pelea_data.get("Última Victoria", ""),
+        pelea_data.get("Cuota", ""),
+        pelea_data.get("Transmisión", ""),
+        pelea_data.get("Revisión Cash Out", ""),
+        pelea_data.get("Dominante", ""),
+        pelea_data.get("¿Apuesta Sugerida?", "")
+    ]
+    checklist_sheet.append_row(fila, value_input_option="USER_ENTERED")
+
+def main():
+    updater = Updater(TOKEN)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("help", help_command))
+    dispatcher.add_handler(CommandHandler("status", status))
+    dispatcher.add_handler(CommandHandler("next", next_fight))
+
+    job_queue = updater.job_queue
+    job_queue.run_repeating(enviar_alerta, interval=60, first=10)
+
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
+
+
+# Nuevo comando para agregar pelea al checklist desde Telegram
+def analizar(update: Update, context: CallbackContext):
+    try:
+        if len(context.args) < 16:
+            update.message.reply_text("⚠️ Formato incompleto. Debes enviar 16 datos separados por '|'.\nEjemplo:\n/analizar Keyshawn Davis|Miguel Madueño|10-ago-2025|20:00|Técnico|Frontal|✅|✅|✅|✅|✅|1.28|DAZN|✅|Keyshawn Davis|✅")
+            return
+
+        pelea_data = {
+            "Peleador A": context.args[0],
+            "Peleador B": context.args[1],
+            "Fecha": context.args[2],
+            "Hora CDMX": context.args[3],
+            "Estilo A": context.args[4],
+            "Estilo B": context.args[5],
+            "Campamento A": context.args[6],
+            "Fallos Rival": context.args[7],
+            "Estado Mental": context.args[8],
+            "Ventaja Física": context.args[9],
+            "Última Victoria": context.args[10],
+            "Cuota": context.args[11],
+            "Transmisión": context.args[12],
+            "Revisión Cash Out": context.args[13],
+            "Dominante": context.args[14],
+            "¿Apuesta Sugerida?": context.args[15]
+        }
+
+        agregar_a_checklist(pelea_data)
+        update.message.reply_text("✅ Análisis agregado exitosamente a la hoja 'Checklist'.")
+    except Exception as e:
+        logging.error(f"Error al agregar análisis: {e}")
+        update.message.reply_text("❌ Error al agregar el análisis. Revisa el formato o intenta más tarde.")
+
+# Agregar handler de /analizar
+dispatcher.add_handler(CommandHandler("analizar", analizar, pass_args=True))
