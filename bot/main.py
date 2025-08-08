@@ -7,7 +7,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from telegram.ext import Updater, CommandHandler, CallbackContext
 from telegram import Update
 
-# Configuración básica del logging
+# Configuración de logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # Variables de entorno
@@ -28,16 +28,12 @@ sheet = client.open_by_key(SHEET_ID)
 apuestas_sheet = sheet.worksheet(SHEET_NAME)
 checklist_sheet = sheet.worksheet("Checklist")
 
-# Función para obtener apuestas activas
+# Obtener apuestas activas
 def get_apuestas_activas():
     records = apuestas_sheet.get_all_records()
-    activas = []
-    for row in records:
-        if row.get("Estatus", "").strip().lower() == "activa":
-            activas.append(row)
-    return activas
+    return [row for row in records if row.get("Estatus", "").strip().lower() == "activa"]
 
-# Comandos de bot
+# Comandos
 def start(update: Update, context: CallbackContext):
     update.message.reply_text("🤖 Bot de apuestas activo. Usa /next para ver la siguiente pelea.")
 
@@ -52,13 +48,12 @@ def next_fight(update: Update, context: CallbackContext):
     if not activas:
         update.message.reply_text("⛔ No hay peleas activas registradas.")
         return
-
     activas.sort(key=lambda x: x['Fecha'] + ' ' + x['Hora (CDMX)'])
     pelea = activas[0]
     mensaje = f"📅 Próxima pelea: {pelea['Pelea']}\n🕒 Hora: {pelea['Hora (CDMX)']}\n💰 Monto: ${pelea['Monto Apostado (MXN)']}\n🔥 Cuota: {pelea['Cuota']}"
     update.message.reply_text(mensaje)
 
-# Envío de alertas programadas
+# Alertas automáticas
 def enviar_alerta(context: CallbackContext):
     now_utc = datetime.now(pytz.utc)
     activas = get_apuestas_activas()
@@ -80,7 +75,7 @@ def enviar_alerta(context: CallbackContext):
         except Exception as e:
             logging.error(f"Error procesando pelea: {pelea.get('Pelea', 'desconocida')} - {e}")
 
-# Nueva función: agregar fila al checklist
+# Escribir en Checklist
 def agregar_a_checklist(pelea_data: dict):
     fila = [
         pelea_data.get("Peleador A", ""),
@@ -102,6 +97,45 @@ def agregar_a_checklist(pelea_data: dict):
     ]
     checklist_sheet.append_row(fila, value_input_option="USER_ENTERED")
 
+# Comando /analizar
+def analizar(update: Update, context: CallbackContext):
+    try:
+        if not context.args or len(context.args) < 16:
+            update.message.reply_text("⚠️ Formato incompleto. Debes enviar 16 datos separados por '|'.\nEjemplo:\n/analizar Keyshawn Davis|Miguel Madueño|10-ago-2025|20:00|Técnico|Frontal|✅|✅|✅|✅|✅|1.28|DAZN|✅|Keyshawn Davis|✅")
+            return
+
+        args_joined = " ".join(context.args)
+        campos = args_joined.split("|")
+        if len(campos) < 16:
+            update.message.reply_text("⚠️ Faltan campos. Revisa que uses 16 datos separados por '|'.")
+            return
+
+        pelea_data = {
+            "Peleador A": campos[0].strip(),
+            "Peleador B": campos[1].strip(),
+            "Fecha": campos[2].strip(),
+            "Hora CDMX": campos[3].strip(),
+            "Estilo A": campos[4].strip(),
+            "Estilo B": campos[5].strip(),
+            "Campamento A": campos[6].strip(),
+            "Fallos Rival": campos[7].strip(),
+            "Estado Mental": campos[8].strip(),
+            "Ventaja Física": campos[9].strip(),
+            "Última Victoria": campos[10].strip(),
+            "Cuota": campos[11].strip(),
+            "Transmisión": campos[12].strip(),
+            "Revisión Cash Out": campos[13].strip(),
+            "Dominante": campos[14].strip(),
+            "¿Apuesta Sugerida?": campos[15].strip()
+        }
+
+        agregar_a_checklist(pelea_data)
+        update.message.reply_text("✅ Análisis agregado exitosamente a la hoja 'Checklist'.")
+    except Exception as e:
+        logging.error(f"Error en /analizar: {e}")
+        update.message.reply_text("❌ Error al procesar el análisis. Revisa el formato o consulta /help.")
+
+# Función principal
 def main():
     updater = Updater(TOKEN)
     dispatcher = updater.dispatcher
@@ -110,48 +144,12 @@ def main():
     dispatcher.add_handler(CommandHandler("help", help_command))
     dispatcher.add_handler(CommandHandler("status", status))
     dispatcher.add_handler(CommandHandler("next", next_fight))
+    dispatcher.add_handler(CommandHandler("analizar", analizar, pass_args=True))
 
-    job_queue = updater.job_queue
-    job_queue.run_repeating(enviar_alerta, interval=60, first=10)
+    updater.job_queue.run_repeating(enviar_alerta, interval=60, first=10)
 
     updater.start_polling()
     updater.idle()
 
 if __name__ == '__main__':
     main()
-
-
-# Nuevo comando para agregar pelea al checklist desde Telegram
-def analizar(update: Update, context: CallbackContext):
-    try:
-        if len(context.args) < 16:
-            update.message.reply_text("⚠️ Formato incompleto. Debes enviar 16 datos separados por '|'.\nEjemplo:\n/analizar Keyshawn Davis|Miguel Madueño|10-ago-2025|20:00|Técnico|Frontal|✅|✅|✅|✅|✅|1.28|DAZN|✅|Keyshawn Davis|✅")
-            return
-
-        pelea_data = {
-            "Peleador A": context.args[0],
-            "Peleador B": context.args[1],
-            "Fecha": context.args[2],
-            "Hora CDMX": context.args[3],
-            "Estilo A": context.args[4],
-            "Estilo B": context.args[5],
-            "Campamento A": context.args[6],
-            "Fallos Rival": context.args[7],
-            "Estado Mental": context.args[8],
-            "Ventaja Física": context.args[9],
-            "Última Victoria": context.args[10],
-            "Cuota": context.args[11],
-            "Transmisión": context.args[12],
-            "Revisión Cash Out": context.args[13],
-            "Dominante": context.args[14],
-            "¿Apuesta Sugerida?": context.args[15]
-        }
-
-        agregar_a_checklist(pelea_data)
-        update.message.reply_text("✅ Análisis agregado exitosamente a la hoja 'Checklist'.")
-    except Exception as e:
-        logging.error(f"Error al agregar análisis: {e}")
-        update.message.reply_text("❌ Error al agregar el análisis. Revisa el formato o intenta más tarde.")
-
-# Agregar handler de /analizar
-dispatcher.add_handler(CommandHandler("analizar", analizar, pass_args=True))
