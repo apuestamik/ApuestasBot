@@ -38,7 +38,7 @@ def start(update: Update, context: CallbackContext):
     update.message.reply_text("🤖 Bot de apuestas activo. Usa /next para ver la siguiente pelea.")
 
 def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("/start - Iniciar bot\n/next - Ver siguiente pelea\n/status - Ver estado del sistema\n/help - Ayuda")
+    update.message.reply_text("/start - Iniciar bot\n/next - Ver siguiente pelea\n/status - Ver estado del sistema\n/help - Ayuda\n/analizar - Agrega análisis al Checklist\n/activar - Activa una pelea desde el Checklist")
 
 def status(update: Update, context: CallbackContext):
     update.message.reply_text("✅ Sistema funcionando correctamente y monitoreando peleas activas.")
@@ -135,7 +135,31 @@ def analizar(update: Update, context: CallbackContext):
         logging.error(f"Error en /analizar: {e}")
         update.message.reply_text("❌ Error al procesar el análisis. Revisa el formato o consulta /help.")
 
-# Función principal
+# Comando /activar
+def activar(update: Update, context: CallbackContext):
+    if not context.args:
+        update.message.reply_text("⚠️ Usa: /activar Nombre del Peleador A (ej. /activar Keyshawn Davis)")
+        return
+
+    nombre = " ".join(context.args).strip().lower()
+    rows = checklist_sheet.get_all_records()
+    for row in rows:
+        if row["Peleador A"].strip().lower() == nombre:
+            pelea = f"{row['Peleador A']} vs {row['Peleador B']}"
+            nueva_fila = [
+                row["Fecha"],
+                pelea,
+                "5000",  # monto fijo por ahora, puedes ajustarlo
+                row["Cuota"],
+                row["Hora CDMX"],
+                "Activa"
+            ]
+            apuestas_sheet.append_row(nueva_fila, value_input_option="USER_ENTERED")
+            update.message.reply_text(f"✅ Pelea '{pelea}' activada y registrada en 'Apuestas Telegram'.")
+            return
+    update.message.reply_text("❌ Peleador no encontrado en el Checklist.")
+
+# Main
 def main():
     updater = Updater(TOKEN)
     dispatcher = updater.dispatcher
@@ -145,9 +169,9 @@ def main():
     dispatcher.add_handler(CommandHandler("status", status))
     dispatcher.add_handler(CommandHandler("next", next_fight))
     dispatcher.add_handler(CommandHandler("analizar", analizar, pass_args=True))
+    dispatcher.add_handler(CommandHandler("activar", activar, pass_args=True))
 
     updater.job_queue.run_repeating(enviar_alerta, interval=60, first=10)
-
     updater.start_polling()
     updater.idle()
 
